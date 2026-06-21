@@ -1,11 +1,11 @@
 import Foundation
 
 struct RepoFingerprint: Codable, Equatable, Sendable {
-    let headModifiedAt: TimeInterval?
-    let indexModifiedAt: TimeInterval?
-    let headLogModifiedAt: TimeInterval?
-    let fetchHeadModifiedAt: TimeInterval?
-    let rootModifiedAt: TimeInterval?
+    let headModifiedAt: Int64?
+    let indexModifiedAt: Int64?
+    let headLogModifiedAt: Int64?
+    let fetchHeadModifiedAt: Int64?
+    let rootModifiedAt: Int64?
 }
 
 enum GitDirectoryResolver {
@@ -54,11 +54,11 @@ enum RepoFingerprintProbe {
         )
     }
 
-    private static func modificationTimestamp(at url: URL) -> TimeInterval? {
+    private static func modificationTimestamp(at url: URL) -> Int64? {
         guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
               let date = values.contentModificationDate else {
             return nil
         }
-        return date.timeIntervalSince1970
+        return Int64(date.timeIntervalSince1970.rounded(.down))
     }
 }

@@ -10,7 +10,7 @@ final class ScanCacheTests: XCTestCase {
             headLogModifiedAt: 1_700_000_200,
             fetchHeadModifiedAt: nil,
             rootModifiedAt: 1_700_000_300
-        )
+        ) // Int64 epoch seconds
         let status = GitRepoStatusRecord(
             GitRepoStatus(
                 id: "/Users/test/Github/demo",

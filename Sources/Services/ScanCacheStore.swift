@@ -42,6 +42,13 @@ enum ScanCacheStore {
         return root.appendingPathComponent(filename)
     }
 
+    static func pendingRepos(from document: ScanCacheDocument) -> [GitRepoStatus] {
+        document.entries.values
+            .compactMap { $0.status?.makeStatus(scannedAt: document.savedAt) }
+            .filter(\.hasPendingPushWork)
+            .sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
     private static var applicationSupportDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")

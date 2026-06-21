@@ -3,6 +3,8 @@ import Foundation
 enum GitRepoScanner {
     /// Only immediate children of the scan root are considered (depth 1).
     private static let scanDepth = 1
+    private static let maxConcurrentGitScans = 12
+    private static let maxChangedPathStats = 32
 
     static func scan(
         rootPath: String,
@@ -28,16 +30,55 @@ enum GitRepoScanner {
             (url.path, cacheDocument.entries[url.path])
         })
 
-        await withTaskGroup(of: RepoScanOutcome.self) { group in
+        let classifications = await withTaskGroup(of: RepoClassification.self) { group in
             for repoURL in repoPaths {
                 let cachedEntry = cachedEntries[repoURL.path] ?? nil
                 group.addTask {
-                    resolveRepository(
+                    classifyRepository(
                         at: repoURL,
                         scannedAt: scannedAt,
                         cachedEntry: cachedEntry,
                         force: force
                     )
+                }
+            }
+
+            var results: [RepoClassification] = []
+            results.reserveCapacity(repoPaths.count)
+            for await classification in group {
+                results.append(classification)
+            }
+            return results
+        }
+
+        let gitLimiter = GitScanLimiter(limit: maxConcurrentGitScans)
+
+        await withTaskGroup(of: RepoScanOutcome.self) { group in
+            for classification in classifications {
+                if let cachedOutcome = classification.cachedOutcome {
+                    group.addTask { cachedOutcome }
+                    continue
+                }
+
+                guard let fingerprint = classification.fingerprint else { continue }
+
+                group.addTask {
+                    await gitLimiter.withPermit {
+                        let status = inspectRepository(
+                            at: classification.repoURL,
+                            gitDirectory: classification.gitDirectory,
+                            scannedAt: scannedAt
+                        )
+                        return RepoScanOutcome(
+                            repoPath: classification.repoURL.path,
+                            source: .scanned,
+                            status: status,
+                            cacheEntry: ScanCacheEntry(
+                                fingerprint: fingerprint,
+                                status: status.map(GitRepoStatusRecord.init)
+                            )
+                        )
+                    }
                 }
             }
 
@@ -57,6 +98,11 @@ enum GitRepoScanner {
 
         let discoveredPaths = Set(repoPaths.map(\.path))
         cacheDocument.entries = cacheDocument.entries.filter { discoveredPaths.contains($0.key) }
+        cacheDocument = ScanCacheDocument(
+            scanRoot: rootPath,
+            entries: cacheDocument.entries,
+            savedAt: scannedAt
+        )
         cache = cacheDocument
 
         let repos = pendingRepos.sorted { $0.lastActivityAt > $1.lastActivityAt }
@@ -66,6 +112,13 @@ enum GitRepoScanner {
             cachedRepos: cachedCount
         )
         return ScanResult(repos: repos, stats: stats)
+    }
+
+    private struct RepoClassification: Sendable {
+        let repoURL: URL
+        let fingerprint: RepoFingerprint?
+        let gitDirectory: URL?
+        let cachedOutcome: RepoScanOutcome?
     }
 
     private enum RepoScanSource {
@@ -80,65 +133,38 @@ enum GitRepoScanner {
         let cacheEntry: ScanCacheEntry
     }
 
-    private static func resolveRepository(
+    private static func classifyRepository(
         at url: URL,
         scannedAt: Date,
         cachedEntry: ScanCacheEntry?,
         force: Bool
-    ) -> RepoScanOutcome {
-        let path = url.path
-        guard let fingerprint = RepoFingerprintProbe.fingerprint(for: url) else {
-            return RepoScanOutcome(
-                repoPath: path,
-                source: .scanned,
-                status: nil,
-                cacheEntry: ScanCacheEntry(
-                    fingerprint: RepoFingerprint(
-                        headModifiedAt: nil,
-                        indexModifiedAt: nil,
-                        headLogModifiedAt: nil,
-                        fetchHeadModifiedAt: nil,
-                        rootModifiedAt: nil
-                    ),
-                    status: nil
-                )
-            )
-        }
+    ) -> RepoClassification {
+        let gitDirectory = GitDirectoryResolver.gitDirectory(for: url)
+        let fingerprint = RepoFingerprintProbe.fingerprint(for: url)
 
         if !force,
+           let fingerprint,
            let cachedEntry,
-           cachedEntry.fingerprint == fingerprint,
-           let record = cachedEntry.status {
-            return RepoScanOutcome(
-                repoPath: path,
+           cachedEntry.fingerprint == fingerprint {
+            let cachedOutcome = RepoScanOutcome(
+                repoPath: url.path,
                 source: .cache,
-                status: record.makeStatus(scannedAt: scannedAt),
+                status: cachedEntry.status?.makeStatus(scannedAt: scannedAt),
                 cacheEntry: cachedEntry
+            )
+            return RepoClassification(
+                repoURL: url,
+                fingerprint: fingerprint,
+                gitDirectory: gitDirectory,
+                cachedOutcome: cachedOutcome
             )
         }
 
-        if !force,
-           let cachedEntry,
-           cachedEntry.fingerprint == fingerprint,
-           cachedEntry.status == nil {
-            return RepoScanOutcome(
-                repoPath: path,
-                source: .cache,
-                status: nil,
-                cacheEntry: cachedEntry
-            )
-        }
-
-        let status = inspectRepository(at: url, scannedAt: scannedAt)
-        let cacheEntry = ScanCacheEntry(
+        return RepoClassification(
+            repoURL: url,
             fingerprint: fingerprint,
-            status: status.map(GitRepoStatusRecord.init)
-        )
-        return RepoScanOutcome(
-            repoPath: path,
-            source: .scanned,
-            status: status,
-            cacheEntry: cacheEntry
+            gitDirectory: gitDirectory,
+            cachedOutcome: nil
         )
     }
 
@@ -165,7 +191,11 @@ enum GitRepoScanner {
         }
     }
 
-    private static func inspectRepository(at url: URL, scannedAt: Date) -> GitRepoStatus? {
+    private static func inspectRepository(
+        at url: URL,
+        gitDirectory: URL?,
+        scannedAt: Date
+    ) -> GitRepoStatus? {
         let path = url.path
         let output = runGit(["status", "--porcelain", "-b"], in: path)
         guard !output.isEmpty else { return nil }
@@ -175,6 +205,7 @@ enum GitRepoScanner {
         let lastActivityAt = resolveLastActivity(
             in: path,
             changedPaths: changedPaths,
+            gitDirectory: gitDirectory,
             fallback: scannedAt
         )
 
@@ -230,13 +261,16 @@ enum GitRepoScanner {
     private static func resolveLastActivity(
         in path: String,
         changedPaths: [String],
+        gitDirectory: URL?,
         fallback: Date
     ) -> Date {
         var candidates: [Date] = []
         if let fileDate = latestFileModification(in: path, relativePaths: changedPaths) {
             candidates.append(fileDate)
         }
-        if let commitDate = lastCommitDate(in: path) {
+        if let gitDirectory,
+           let values = try? gitDirectory.appendingPathComponent("logs/HEAD").resourceValues(forKeys: [.contentModificationDateKey]),
+           let commitDate = values.contentModificationDate {
             candidates.append(commitDate)
         }
         return candidates.max() ?? fallback
@@ -248,7 +282,7 @@ enum GitRepoScanner {
         let baseURL = URL(fileURLWithPath: path, isDirectory: true)
         var latest: Date?
 
-        for relativePath in relativePaths {
+        for relativePath in relativePaths.prefix(maxChangedPathStats) {
             let fileURL = baseURL.appendingPathComponent(relativePath)
             guard let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
                   let modifiedAt = values.contentModificationDate else {
@@ -264,12 +298,6 @@ enum GitRepoScanner {
         }
 
         return latest
-    }
-
-    private static func lastCommitDate(in path: String) -> Date? {
-        let output = runGit(["log", "-1", "--format=%ct"], in: path)
-        guard let timestamp = TimeInterval(output) else { return nil }
-        return Date(timeIntervalSince1970: timestamp)
     }
 
     struct ParsedPorcelainStatus: Equatable {

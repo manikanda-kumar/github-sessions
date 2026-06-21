@@ -59,6 +59,8 @@ Open **Settings** from the app menu (⌘,):
 
 Manual refresh (↻ button or menu bar **Refresh**) forces a full rescan of every repo. Auto-refresh uses the cache.
 
+On launch, cached pending repos appear immediately while a background incremental scan runs (max 12 concurrent `git` processes).
+
 ## Scan cache
 
 Cache lives at:

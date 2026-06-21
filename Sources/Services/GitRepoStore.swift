@@ -15,14 +15,16 @@ final class GitRepoStore: ObservableObject {
 
     init(defaultScanPath: String = NSHomeDirectory() + "/Github") {
         scanPath = UserDefaults.standard.string(forKey: Self.scanPathKey) ?? defaultScanPath
+        hydrateFromCache()
     }
 
     func startAutoRefresh(interval: TimeInterval = 60) {
         autoRefreshTask?.cancel()
         autoRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.refresh()
                 try? await Task.sleep(for: .seconds(interval))
+                guard !Task.isCancelled else { return }
+                await self?.refresh()
             }
         }
     }
@@ -49,7 +51,10 @@ final class GitRepoStore: ObservableObject {
     }
 
     private func performScan(path: String, force: Bool) async {
-        isScanning = true
+        let showsFullScreenSpinner = repos.isEmpty
+        if showsFullScreenSpinner {
+            isScanning = true
+        }
         lastError = nil
 
         var cache = ScanCacheStore.load(for: path)
@@ -68,6 +73,12 @@ final class GitRepoStore: ObservableObject {
         lastScanStats = result.stats
         lastScanAt = .now
         isScanning = false
+    }
+
+    private func hydrateFromCache() {
+        guard let cache = ScanCacheStore.load(for: scanPath) else { return }
+        repos = ScanCacheStore.pendingRepos(from: cache)
+        lastScanAt = cache.savedAt
     }
 
     private static let scanPathKey = "GitHubSessionsScanPath"
