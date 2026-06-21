@@ -30,7 +30,7 @@ enum ScanCacheStore {
             let data = try encoder.encode(document)
             try data.write(to: url, options: .atomic)
         } catch {
-            NSLog("Failed to save scan cache: \(error.localizedDescription)")
+            ScanDiagnostics.error("cache save failed: \(error.localizedDescription) url=\(url.path)")
         }
     }
 

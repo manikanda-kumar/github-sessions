@@ -19,7 +19,9 @@ enum GitRepoScanner {
         }
 
         let repoPaths = discoverRepositories(in: rootURL, fileManager: fileManager)
+        ScanDiagnostics.log("discovered repos=\(repoPaths.count) root=\(rootPath)")
         let scannedAt = Date()
+        let classifyStartedAt = ContinuousClock.now
         var cacheDocument = cache ?? ScanCacheDocument(scanRoot: rootPath, entries: [:])
         var pendingRepos: [GitRepoStatus] = []
         pendingRepos.reserveCapacity(repoPaths.count)
@@ -50,6 +52,12 @@ enum GitRepoScanner {
             }
             return results
         }
+
+        let classifyElapsed = classifyStartedAt.duration(to: .now)
+        let gitCandidates = classifications.filter { $0.cachedOutcome == nil && $0.fingerprint != nil }.count
+        ScanDiagnostics.log(
+            "classified in \(ScanDiagnostics.formatDuration(classifyElapsed)) gitCandidates=\(gitCandidates)"
+        )
 
         let gitLimiter = GitScanLimiter(limit: maxConcurrentGitScans)
 
