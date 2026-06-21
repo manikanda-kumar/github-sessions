@@ -1,0 +1,45 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Xcode
+DerivedData/
+build/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# Swift Package Manager
+.build/
+Package.resolved
+
+# Local build & release artifacts
+dist/
+*.dmg
+*.pkg
+
+# Logs
+*.log
+
+# Editor / agent local state
+.idea/
+.vscode/
+*.swp
+*~
+.codex/
+.claude/settings.local.json
+.claude/worktrees/
+
+# Python (if scripts added later)
+__pycache__/
+*.pyc
+.venv/

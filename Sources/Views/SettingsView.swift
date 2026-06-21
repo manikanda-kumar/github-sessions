@@ -3,6 +3,8 @@ import AppKit
 
 struct SettingsView: View {
     @EnvironmentObject private var store: GitRepoStore
+    @AppStorage(AppPreferences.menuBarEnabledKey) private var menuBarEnabled = true
+    @AppStorage(AppPreferences.hideDockIconKey) private var hideDockIcon = false
     @State private var pathDraft = ""
 
     var body: some View {
@@ -14,7 +16,18 @@ struct SettingsView: View {
                         chooseDirectory()
                     }
                 }
-                Text("Shows git repos with local changes or unpushed commits.")
+                Text("Shows git repos with local changes or unpushed commits. Scan results are cached in Application Support and only re-checked when a repo folder changes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Menu Bar") {
+                Toggle("Show menu bar icon", isOn: $menuBarEnabled)
+                Toggle("Hide dock icon", isOn: $hideDockIcon)
+                    .onChange(of: hideDockIcon) { _, hide in
+                        NSApp.setActivationPolicy(hide ? .accessory : .regular)
+                    }
+                Text("Menu bar shows pending repo count and a quick list on click.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

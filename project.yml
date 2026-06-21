@@ -36,8 +36,8 @@ targets:
     sources:
       - path: Sources
         type: syncedFolder
-    resources:
-      - Resources
+      - path: Resources/Assets.xcassets
+        buildPhase: resources
     settings:
       base:
         INFOPLIST_FILE: Sources/Info.plist

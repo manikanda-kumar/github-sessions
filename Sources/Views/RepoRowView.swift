@@ -2,6 +2,8 @@ import SwiftUI
 
 struct RepoRowView: View {
     let repo: GitRepoStatus
+    let isExpanded: Bool
+    var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -30,8 +32,26 @@ struct RepoRowView: View {
             }
 
             Spacer(minLength: 0)
+
+            Text(repo.lastActivityLabel)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+                .frame(minWidth: 44, alignment: .trailing)
+
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 4)
+        .padding(.horizontal, 2)
+        .background {
+            if isSelected || isExpanded {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.accentColor.opacity(isExpanded ? 0.14 : 0.08))
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     private var statusColor: Color {

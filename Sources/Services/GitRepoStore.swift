@@ -6,6 +6,7 @@ final class GitRepoStore: ObservableObject {
     @Published private(set) var repos: [GitRepoStatus] = []
     @Published private(set) var isScanning = false
     @Published private(set) var lastScanAt: Date?
+    @Published private(set) var lastScanStats: ScanStats?
     @Published private(set) var lastError: String?
     @Published var scanPath: String
 
@@ -31,10 +32,10 @@ final class GitRepoStore: ObservableObject {
         autoRefreshTask = nil
     }
 
-    func refresh() async {
+    func refresh(force: Bool = false) async {
         refreshTask?.cancel()
-        refreshTask = Task { [scanPath] in
-            await performScan(path: scanPath)
+        refreshTask = Task { [scanPath, force] in
+            await performScan(path: scanPath, force: force)
         }
         await refreshTask?.value
     }
@@ -47,18 +48,24 @@ final class GitRepoStore: ObservableObject {
         Task { await refresh() }
     }
 
-    private func performScan(path: String) async {
+    private func performScan(path: String, force: Bool) async {
         isScanning = true
         lastError = nil
 
-        let results = await GitRepoScanner.scan(rootPath: path)
+        var cache = ScanCacheStore.load(for: path)
+        let result = await GitRepoScanner.scan(rootPath: path, cache: &cache, force: force)
 
         guard !Task.isCancelled else {
             isScanning = false
             return
         }
 
-        repos = results
+        if let cache {
+            ScanCacheStore.save(cache, for: path)
+        }
+
+        repos = result.repos
+        lastScanStats = result.stats
         lastScanAt = .now
         isScanning = false
     }

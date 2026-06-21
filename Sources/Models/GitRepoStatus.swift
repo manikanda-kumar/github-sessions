@@ -14,6 +14,7 @@ struct GitRepoStatus: Identifiable, Hashable, Sendable {
     let behindCount: Int
     let hasUpstream: Bool
     let scannedAt: Date
+    let lastActivityAt: Date
 
     var hasPendingPushWork: Bool {
         stagedCount > 0
@@ -21,6 +22,10 @@ struct GitRepoStatus: Identifiable, Hashable, Sendable {
             || untrackedCount > 0
             || deletedCount > 0
             || aheadCount > 0
+    }
+
+    var lastActivityLabel: String {
+        RelativeDateFormatting.agoLabel(for: lastActivityAt)
     }
 
     var statusIcon: String {

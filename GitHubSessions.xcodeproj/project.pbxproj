@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		1CD2260E37755697B6CFE08C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1CBD4250D41A9B71A4DB37EA /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		D5AF3DC310AA8F0712FFB8C2 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -17,6 +21,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		1CBD4250D41A9B71A4DB37EA /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AC5597A4E34432232C2FB62B /* GitHubSessionsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GitHubSessionsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E0EDCFB62599CAC968C25443 /* GitHubSessions.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GitHubSessions.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -66,6 +71,14 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXGroup section */
+		26AB5ECFE8AF2078E0C7E24C /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				1CBD4250D41A9B71A4DB37EA /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
 		30C57DDC57DED6CE6B3672EE /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -78,6 +91,7 @@
 		BDB88EA24806277FE0CB6E31 = {
 			isa = PBXGroup;
 			children = (
+				26AB5ECFE8AF2078E0C7E24C /* Resources */,
 				7BAB9C86AA98B694DC311DDF /* Sources */,
 				63B519D457088568A3219DB5 /* Tests */,
 				30C57DDC57DED6CE6B3672EE /* Products */,
@@ -173,6 +187,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1CD2260E37755697B6CFE08C /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject private var store: GitRepoStore
     @State private var query = ""
     @State private var selection: GitRepoStatus.ID?
+    @State private var expandedRepoIDs: Set<String> = []
 
     private var filteredRepos: [GitRepoStatus] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -31,6 +32,13 @@ struct ContentView: View {
         .onDisappear {
             store.stopAutoRefresh()
         }
+        .onChange(of: store.repos) { _, repos in
+            let validIDs = Set(repos.map(\.id))
+            expandedRepoIDs = expandedRepoIDs.intersection(validIDs)
+            if let selection, !validIDs.contains(selection) {
+                self.selection = nil
+            }
+        }
     }
 
     private var header: some View {
@@ -50,7 +58,7 @@ struct ContentView: View {
                 .frame(width: 220)
 
             Button {
-                Task { await store.refresh() }
+                Task { await store.refresh(force: true) }
             } label: {
                 if store.isScanning {
                     ProgressView()
@@ -60,7 +68,7 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(.borderless)
-            .help("Refresh")
+            .help("Rescan all repositories")
             .disabled(store.isScanning)
         }
         .padding(.horizontal, 14)
@@ -74,7 +82,11 @@ struct ContentView: View {
             let formatter = RelativeDateTimeFormatter()
             formatter.unitsStyle = .abbreviated
             let relative = formatter.localizedString(for: lastScanAt, relativeTo: .now)
-            return "\(count) repo\(count == 1 ? "" : "s") pending in ~/\(root) · updated \(relative)"
+            var subtitle = "\(count) repo\(count == 1 ? "" : "s") pending in ~/\(root) · updated \(relative)"
+            if let stats = store.lastScanStats, stats.cachedRepos > 0 {
+                subtitle += " · \(stats.cachedRepos) cached, \(stats.scannedRepos) scanned"
+            }
+            return subtitle
         }
         return "Scanning ~/\(root) for unpushed work"
     }
@@ -108,28 +120,53 @@ struct ContentView: View {
     }
 
     private var repoList: some View {
-        List(selection: $selection) {
+        List {
             ForEach(filteredRepos) { repo in
-                RepoRowView(repo: repo)
-                    .tag(repo.id)
-                    .onTapGesture(count: 2) {
-                        openInTerminal(repo.path)
+                VStack(alignment: .leading, spacing: 0) {
+                    Button {
+                        toggleExpansion(for: repo)
+                    } label: {
+                        RepoRowView(
+                            repo: repo,
+                            isExpanded: expandedRepoIDs.contains(repo.id),
+                            isSelected: selection == repo.id
+                        )
                     }
-                    .contextMenu {
-                        Button("Reveal in Finder") {
-                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: repo.path.path)
-                        }
-                        Button("Open in Terminal") {
-                            openInTerminal(repo.path)
-                        }
-                        Button("Copy Path") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(repo.path.path, forType: .string)
-                        }
+                    .buttonStyle(.plain)
+
+                    if expandedRepoIDs.contains(repo.id) {
+                        RepoDetailView(repo: repo)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
+                }
+                .contextMenu {
+                    Button(expandedRepoIDs.contains(repo.id) ? "Collapse Details" : "Expand Details") {
+                        toggleExpansion(for: repo)
+                    }
+                    Button("Open in iTerm") {
+                        ITermLauncher.openGitStatus(at: repo.path)
+                    }
+                    Button("Reveal in Finder") {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: repo.path.path)
+                    }
+                    Button("Copy Path") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(repo.path.path, forType: .string)
+                    }
+                }
             }
         }
         .listStyle(.inset)
+        .animation(.easeInOut(duration: 0.18), value: expandedRepoIDs)
+    }
+
+    private func toggleExpansion(for repo: GitRepoStatus) {
+        selection = repo.id
+        if expandedRepoIDs.contains(repo.id) {
+            expandedRepoIDs.remove(repo.id)
+        } else {
+            expandedRepoIDs.insert(repo.id)
+        }
     }
 
     private func emptyState(
@@ -156,26 +193,6 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)
-    }
-
-    private func openInTerminal(_ url: URL) {
-        let script = """
-        tell application "Terminal"
-            activate
-            do script "cd \(url.path.escapedForAppleScript)"
-        end tell
-        """
-        var error: NSDictionary?
-        if let appleScript = NSAppleScript(source: script) {
-            appleScript.executeAndReturnError(&error)
-        }
-    }
-}
-
-private extension String {
-    var escapedForAppleScript: String {
-        replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }
 

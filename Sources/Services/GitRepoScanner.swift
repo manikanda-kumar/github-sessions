@@ -1,33 +1,151 @@
 import Foundation
 
 enum GitRepoScanner {
-    static func scan(rootPath: String) async -> [GitRepoStatus] {
+    /// Only immediate children of the scan root are considered (depth 1).
+    private static let scanDepth = 1
+
+    static func scan(
+        rootPath: String,
+        cache: inout ScanCacheDocument?,
+        force: Bool = false
+    ) async -> ScanResult {
         let fileManager = FileManager.default
         let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
-        guard fileManager.fileExists(atPath: rootURL.path) else { return [] }
+        guard fileManager.fileExists(atPath: rootURL.path) else {
+            cache = nil
+            return ScanResult(repos: [], stats: ScanStats(totalRepos: 0, scannedRepos: 0, cachedRepos: 0))
+        }
 
         let repoPaths = discoverRepositories(in: rootURL, fileManager: fileManager)
         let scannedAt = Date()
+        var cacheDocument = cache ?? ScanCacheDocument(scanRoot: rootPath, entries: [:])
+        var pendingRepos: [GitRepoStatus] = []
+        pendingRepos.reserveCapacity(repoPaths.count)
 
-        return await withTaskGroup(of: GitRepoStatus?.self) { group in
-            for path in repoPaths {
+        var scannedCount = 0
+        var cachedCount = 0
+        let cachedEntries = Dictionary(uniqueKeysWithValues: repoPaths.map { url in
+            (url.path, cacheDocument.entries[url.path])
+        })
+
+        await withTaskGroup(of: RepoScanOutcome.self) { group in
+            for repoURL in repoPaths {
+                let cachedEntry = cachedEntries[repoURL.path] ?? nil
                 group.addTask {
-                    inspectRepository(at: path, scannedAt: scannedAt)
+                    resolveRepository(
+                        at: repoURL,
+                        scannedAt: scannedAt,
+                        cachedEntry: cachedEntry,
+                        force: force
+                    )
                 }
             }
 
-            var results: [GitRepoStatus] = []
-            results.reserveCapacity(repoPaths.count)
-            for await status in group {
-                if let status, status.hasPendingPushWork {
-                    results.append(status)
+            for await outcome in group {
+                cacheDocument.entries[outcome.repoPath] = outcome.cacheEntry
+                switch outcome.source {
+                case .scanned:
+                    scannedCount += 1
+                case .cache:
+                    cachedCount += 1
+                }
+                if let status = outcome.status, status.hasPendingPushWork {
+                    pendingRepos.append(status)
                 }
             }
-            return results.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
+
+        let discoveredPaths = Set(repoPaths.map(\.path))
+        cacheDocument.entries = cacheDocument.entries.filter { discoveredPaths.contains($0.key) }
+        cache = cacheDocument
+
+        let repos = pendingRepos.sorted { $0.lastActivityAt > $1.lastActivityAt }
+        let stats = ScanStats(
+            totalRepos: repoPaths.count,
+            scannedRepos: scannedCount,
+            cachedRepos: cachedCount
+        )
+        return ScanResult(repos: repos, stats: stats)
     }
 
+    private enum RepoScanSource {
+        case scanned
+        case cache
+    }
+
+    private struct RepoScanOutcome: Sendable {
+        let repoPath: String
+        let source: RepoScanSource
+        let status: GitRepoStatus?
+        let cacheEntry: ScanCacheEntry
+    }
+
+    private static func resolveRepository(
+        at url: URL,
+        scannedAt: Date,
+        cachedEntry: ScanCacheEntry?,
+        force: Bool
+    ) -> RepoScanOutcome {
+        let path = url.path
+        guard let fingerprint = RepoFingerprintProbe.fingerprint(for: url) else {
+            return RepoScanOutcome(
+                repoPath: path,
+                source: .scanned,
+                status: nil,
+                cacheEntry: ScanCacheEntry(
+                    fingerprint: RepoFingerprint(
+                        headModifiedAt: nil,
+                        indexModifiedAt: nil,
+                        headLogModifiedAt: nil,
+                        fetchHeadModifiedAt: nil,
+                        rootModifiedAt: nil
+                    ),
+                    status: nil
+                )
+            )
+        }
+
+        if !force,
+           let cachedEntry,
+           cachedEntry.fingerprint == fingerprint,
+           let record = cachedEntry.status {
+            return RepoScanOutcome(
+                repoPath: path,
+                source: .cache,
+                status: record.makeStatus(scannedAt: scannedAt),
+                cacheEntry: cachedEntry
+            )
+        }
+
+        if !force,
+           let cachedEntry,
+           cachedEntry.fingerprint == fingerprint,
+           cachedEntry.status == nil {
+            return RepoScanOutcome(
+                repoPath: path,
+                source: .cache,
+                status: nil,
+                cacheEntry: cachedEntry
+            )
+        }
+
+        let status = inspectRepository(at: url, scannedAt: scannedAt)
+        let cacheEntry = ScanCacheEntry(
+            fingerprint: fingerprint,
+            status: status.map(GitRepoStatusRecord.init)
+        )
+        return RepoScanOutcome(
+            repoPath: path,
+            source: .scanned,
+            status: status,
+            cacheEntry: cacheEntry
+        )
+    }
+
+    /// Lists only depth-1 directories under `rootURL` that contain a `.git` entry.
     private static func discoverRepositories(in rootURL: URL, fileManager: FileManager) -> [URL] {
+        guard scanDepth == 1 else { return [] }
+
         guard let entries = try? fileManager.contentsOfDirectory(
             at: rootURL,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -37,9 +155,8 @@ enum GitRepoScanner {
         }
 
         return entries.compactMap { entry in
-            var isDirectory = ObjCBool(false)
-            guard fileManager.fileExists(atPath: entry.path, isDirectory: &isDirectory),
-                  isDirectory.boolValue else {
+            guard let values = try? entry.resourceValues(forKeys: [.isDirectoryKey]),
+                  values.isDirectory == true else {
                 return nil
             }
             let gitPath = entry.appendingPathComponent(".git").path
@@ -50,63 +167,210 @@ enum GitRepoScanner {
 
     private static func inspectRepository(at url: URL, scannedAt: Date) -> GitRepoStatus? {
         let path = url.path
-        guard runGit(["rev-parse", "--is-inside-work-tree"], in: path) == "true" else {
-            return nil
-        }
+        let output = runGit(["status", "--porcelain", "-b"], in: path)
+        guard !output.isEmpty else { return nil }
 
-        let branch = currentBranch(in: path) ?? "detached"
-        let stagedCount = lineCount(runGit(["diff", "--cached", "--name-only"], in: path))
-        let modifiedCount = lineCount(runGit(["diff", "--name-only"], in: path))
-        let untrackedCount = lineCount(runGit(["ls-files", "--others", "--exclude-standard"], in: path))
-        let deletedCount = lineCount(runGit(["diff", "--name-only", "--diff-filter=D"], in: path))
-
-        let upstream = runGit(["rev-parse", "--abbrev-ref", "@{u}"], in: path)
-        let hasUpstream = !upstream.isEmpty
-
-        var aheadCount = 0
-        var behindCount = 0
-        if hasUpstream {
-            let counts = runGit(["rev-list", "--left-right", "--count", "@{u}...HEAD"], in: path)
-            let parts = counts.split(separator: "\t")
-            if parts.count == 2,
-               let behind = Int(parts[0]),
-               let ahead = Int(parts[1]) {
-                behindCount = behind
-                aheadCount = ahead
-            }
-        }
+        let parsed = parsePorcelainStatus(output)
+        let changedPaths = parseChangedPaths(from: output)
+        let lastActivityAt = resolveLastActivity(
+            in: path,
+            changedPaths: changedPaths,
+            fallback: scannedAt
+        )
 
         let summary = makeSummary(
-            staged: stagedCount,
-            modified: modifiedCount,
-            untracked: untrackedCount,
-            deleted: deletedCount,
-            ahead: aheadCount,
-            behind: behindCount,
-            hasUpstream: hasUpstream
+            staged: parsed.stagedCount,
+            modified: parsed.modifiedCount,
+            untracked: parsed.untrackedCount,
+            deleted: parsed.deletedCount,
+            ahead: parsed.aheadCount,
+            behind: parsed.behindCount,
+            hasUpstream: parsed.hasUpstream
         )
 
         return GitRepoStatus(
             id: path,
             name: url.lastPathComponent,
             path: url,
-            branch: branch,
+            branch: parsed.branch,
             summary: summary,
+            stagedCount: parsed.stagedCount,
+            modifiedCount: parsed.modifiedCount,
+            untrackedCount: parsed.untrackedCount,
+            deletedCount: parsed.deletedCount,
+            aheadCount: parsed.aheadCount,
+            behindCount: parsed.behindCount,
+            hasUpstream: parsed.hasUpstream,
+            scannedAt: scannedAt,
+            lastActivityAt: lastActivityAt
+        )
+    }
+
+    static func parseChangedPaths(from output: String) -> [String] {
+        var paths: [String] = []
+        paths.reserveCapacity(8)
+
+        for line in output.split(whereSeparator: \.isNewline) {
+            let text = String(line)
+            if text.hasPrefix("## ") || text.count < 4 {
+                continue
+            }
+
+            let pathPart = String(text.dropFirst(3))
+            if let arrow = pathPart.range(of: " -> ") {
+                paths.append(String(pathPart[arrow.upperBound...]))
+            } else {
+                paths.append(pathPart)
+            }
+        }
+
+        return paths
+    }
+
+    private static func resolveLastActivity(
+        in path: String,
+        changedPaths: [String],
+        fallback: Date
+    ) -> Date {
+        var candidates: [Date] = []
+        if let fileDate = latestFileModification(in: path, relativePaths: changedPaths) {
+            candidates.append(fileDate)
+        }
+        if let commitDate = lastCommitDate(in: path) {
+            candidates.append(commitDate)
+        }
+        return candidates.max() ?? fallback
+    }
+
+    private static func latestFileModification(in path: String, relativePaths: [String]) -> Date? {
+        guard !relativePaths.isEmpty else { return nil }
+
+        let baseURL = URL(fileURLWithPath: path, isDirectory: true)
+        var latest: Date?
+
+        for relativePath in relativePaths {
+            let fileURL = baseURL.appendingPathComponent(relativePath)
+            guard let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                  let modifiedAt = values.contentModificationDate else {
+                continue
+            }
+            if let currentLatest = latest {
+                if modifiedAt > currentLatest {
+                    latest = modifiedAt
+                }
+            } else {
+                latest = modifiedAt
+            }
+        }
+
+        return latest
+    }
+
+    private static func lastCommitDate(in path: String) -> Date? {
+        let output = runGit(["log", "-1", "--format=%ct"], in: path)
+        guard let timestamp = TimeInterval(output) else { return nil }
+        return Date(timeIntervalSince1970: timestamp)
+    }
+
+    struct ParsedPorcelainStatus: Equatable {
+        let branch: String
+        let stagedCount: Int
+        let modifiedCount: Int
+        let untrackedCount: Int
+        let deletedCount: Int
+        let aheadCount: Int
+        let behindCount: Int
+        let hasUpstream: Bool
+    }
+
+    static func parsePorcelainStatus(_ output: String) -> ParsedPorcelainStatus {
+        var branch = "unknown"
+        var stagedCount = 0
+        var modifiedCount = 0
+        var untrackedCount = 0
+        var deletedCount = 0
+        var aheadCount = 0
+        var behindCount = 0
+        var hasUpstream = false
+
+        for line in output.split(whereSeparator: \.isNewline) {
+            let text = String(line)
+            if text.hasPrefix("## ") {
+                let branchLine = String(text.dropFirst(3))
+                branch = parseBranchName(from: branchLine)
+                hasUpstream = branchLine.contains("...")
+                aheadCount = parseTrackingCount(in: branchLine, label: "ahead")
+                behindCount = parseTrackingCount(in: branchLine, label: "behind")
+                continue
+            }
+
+            guard text.count >= 2 else { continue }
+            let indexStatus = text[text.startIndex]
+            let workTreeStatus = text[text.index(after: text.startIndex)]
+
+            if indexStatus == "?", workTreeStatus == "?" {
+                untrackedCount += 1
+                continue
+            }
+
+            if indexStatus != " " {
+                stagedCount += 1
+            }
+
+            if workTreeStatus == "M" {
+                modifiedCount += 1
+            } else if workTreeStatus == "D" {
+                deletedCount += 1
+            }
+        }
+
+        return ParsedPorcelainStatus(
+            branch: branch,
             stagedCount: stagedCount,
             modifiedCount: modifiedCount,
             untrackedCount: untrackedCount,
             deletedCount: deletedCount,
             aheadCount: aheadCount,
             behindCount: behindCount,
-            hasUpstream: hasUpstream,
-            scannedAt: scannedAt
+            hasUpstream: hasUpstream
         )
     }
 
-    private static func currentBranch(in path: String) -> String? {
-        let branch = runGit(["rev-parse", "--abbrev-ref", "HEAD"], in: path)
-        guard !branch.isEmpty, branch != "HEAD" else { return nil }
-        return branch
+    private static func parseBranchName(from branchLine: String) -> String {
+        if branchLine.hasPrefix("No commits yet on ") {
+            return String(branchLine.dropFirst("No commits yet on ".count))
+        }
+        if branchLine.hasPrefix("HEAD (no branch)") {
+            return "detached"
+        }
+
+        let head = branchLine.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false).first
+            .map(String.init) ?? branchLine
+
+        if let range = head.range(of: "...") {
+            return String(head[..<range.lowerBound])
+        }
+        return head
+    }
+
+    private static func parseTrackingCount(in branchLine: String, label: String) -> Int {
+        guard let open = branchLine.range(of: "[")?.upperBound,
+              let close = branchLine.range(of: "]")?.lowerBound,
+              open < close else {
+            return 0
+        }
+
+        let bracketContent = branchLine[open..<close]
+        for part in bracketContent.split(separator: ",") {
+            let tokens = part.split(whereSeparator: \.isWhitespace)
+            guard tokens.count == 2,
+                  tokens[0].lowercased() == label,
+                  let value = Int(tokens[1]) else {
+                continue
+            }
+            return value
+        }
+        return 0
     }
 
     private static func makeSummary(
@@ -133,32 +397,9 @@ enum GitRepoScanner {
         return parts.joined(separator: ", ")
     }
 
-    private static func lineCount(_ output: String) -> Int {
-        guard !output.isEmpty else { return 0 }
-        return output.split(whereSeparator: \.isNewline).count
-    }
-
     private static func runGit(_ arguments: [String], in path: String) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: path)
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return ""
-        }
-
-        guard process.terminationStatus == 0 else { return "" }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let result = GitProcessRunner.run(arguments: arguments, in: path)
+        guard result.exitCode == 0 else { return "" }
+        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
